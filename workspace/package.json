@@ -6,8 +6,11 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "subscriber": "node subscriber/server.js",
     "test": "node --test test/",
-    "test:e2e": "node scripts/e2e.mjs"
+    "test:e2e": "node scripts/e2e.mjs",
+    "test:notify": "node --test test/notify.test.js",
+    "demo:notify": "node scripts/notify-demo.mjs"
   },
   "engines": {
     "node": ">=20"

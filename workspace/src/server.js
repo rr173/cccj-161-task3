@@ -6,10 +6,15 @@ import { dirname, join, extname, normalize } from 'node:path';
 import { Kernel } from './kernel.js';
 import { EventStore } from './store.js';
 import { sha256Hex, canonicalJSON } from './util.js';
+import { NotifyEngine } from './notify/engine.js';
+import { Dispatcher } from './notify/dispatcher.js';
+import { KernelBridge } from './notify/bridge.js';
+import { handleNotifyRoute } from './notify/routes.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, '..', 'public');
 const LOG_FILE = process.env.DR_LOG || join(__dirname, '..', 'data', 'events.log');
+const NOTIFY_LOG_FILE = process.env.DR_NOTIFY_LOG || join(__dirname, '..', 'data', 'notify.log');
 
 const store = new EventStore(process.env.DR_MEMORY ? null : LOG_FILE);
 // 先从磁盘重放，再引导内核：空库才写入种子，避免重启后重复种子破坏哈希链。
@@ -29,6 +34,28 @@ if (!recoveryStatus.writable) {
   console.warn(`   主日志已截断到字节 ${recoveryStatus.recovery.byteOffset}，从 seq ${recoveryStatus.brokenAt - 1} 续链。`);
 }
 
+// ---- 独立的聚合商通知投递模块 ----
+// 自有持久化哈希链（notify.log）、每订阅方队列/游标、签名密钥与死信，
+// 与领域内核解耦；桥接器按水位增量消费内核链，投递器逐订阅方独立循环。
+const notifyEngine = new NotifyEngine(process.env.DR_MEMORY ? null : NOTIFY_LOG_FILE);
+await notifyEngine.bootstrap();
+const dispatcher = new Dispatcher(notifyEngine);
+const bridge = new KernelBridge(kernel, notifyEngine);
+// 每次内核命令成功落链后立刻增量同步到通知（定时器仅作兜底）。
+const _kernelDispatch = kernel.dispatch.bind(kernel);
+kernel.dispatch = (cmd) => {
+  const result = _kernelDispatch(cmd);
+  try { bridge.pump(); } catch (e) { console.error('通知桥接同步失败：', e.message); }
+  return result;
+};
+// 启动先追一次（重启恢复：补发未通知/未确认的部分）。
+bridge.pump();
+dispatcher.start();
+// 每次内核命令成功落链后，上面的 dispatch 包装会立即增量同步，无需轮询。
+function pumpNow() {
+  return bridge.pump();
+}
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -36,6 +63,8 @@ const MIME = {
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
 };
+
+const NOTIFY_PUBLIC_DIR = join(__dirname, '..', 'public', 'notify');
 
 function send(res, status, body, headers = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
@@ -64,9 +93,18 @@ async function readBody(req) {
 
 async function serveStatic(req, res) {
   let path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  let baseDir = PUBLIC_DIR;
   if (path === '/') path = '/index.html';
-  const file = normalize(join(PUBLIC_DIR, path));
-  if (!file.startsWith(PUBLIC_DIR)) return send(res, 403, { error: 'forbidden' });
+  // 通知投递页面：/notify/* -> public/notify/*（/notify 与 /notify/ 都回退到 index.html）
+  if (path === '/notify' || path === '/notify/') {
+    baseDir = NOTIFY_PUBLIC_DIR;
+    path = '/index.html';
+  } else if (path.startsWith('/notify/')) {
+    baseDir = NOTIFY_PUBLIC_DIR;
+    path = path.slice('/notify'.length);
+  }
+  const file = normalize(join(baseDir, path));
+  if (!file.startsWith(baseDir)) return send(res, 403, { error: 'forbidden' });
   try {
     const buf = await readFile(file);
     res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream' });
@@ -212,6 +250,16 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { count: recs.length, records: recs });
     }
 
+    // ---- 聚合商通知投递模块 ----
+    if (path.startsWith('/api/notify')) {
+      const handled = await handleNotifyRoute({
+        req, res, path, body, send,
+        engine: notifyEngine, dispatcher, bridge, pumpNow,
+      });
+      if (handled) return;
+      return send(res, 404, { error: 'unknown notify route', path });
+    }
+
     return send(res, 404, { error: 'unknown route', path });
   } catch (err) {
     const statusMap = {
@@ -224,7 +272,7 @@ const server = createServer(async (req, res) => {
     };
     const status = err.status || statusMap[err.code] || 500;
     if (status === 500) console.error(err);
-    const headers = status === 503 ? { 'Retry-After': '300', 'Cache-Control': 'no-store' } : {};
+    const headers = (status === 503) ? { 'Retry-After': '300', 'Cache-Control': 'no-store' } : {};
     send(res, status, {
       ...(err.code === 'LOG_QUARANTINED' ? err.recovery : {}),
       error: err.message,

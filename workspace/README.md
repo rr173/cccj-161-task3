@@ -16,7 +16,7 @@ npm start                 # http://localhost:8080
 ```
 
 - 设备执行页面（运营台）：http://localhost:8080/
-- 自动化测试：`npm test`（27 个领域/恢复单测）
+- 自动化测试：`npm test`（38 个领域/恢复/通知单测；`npm run test:notify` 可单跑通知模块 11 项）
 - 端到端场景：先 `npm start`，再 `npm run test:e2e`（24 项 HTTP 断言）
 
 ## 重启恢复契约（日志损坏 / 断电残尾）
@@ -71,6 +71,59 @@ npm start                 # http://localhost:8080
 报告裁决等级：`MET`（交付率 ≥ 100%）、`PARTIAL`（≥ 50%）、`MISSED`、`INCONCLUSIVE`（缺口 ≥ 40%）、
 `NO_PARTICIPATION`、`RECALLED`。设备履约：`PERFORMED / UNDERPERFORMED / FAILED / OPT_OUT`。
 
+## 聚合商通知投递模块（独立模块）
+
+需求响应事件在 **发布 / 撤销 / 开始 / 结束 / 报告订正** 五个时点，向各订阅聚合商投递
+**带 Ed25519 签名的不可变通知信封**。模块与领域内核解耦，拥有独立的只增 + SHA-256
+哈希链 `data/notify.log`（复用同一套残尾恢复 / 篡改只读隔离契约）。
+
+- **不可变信封**：入队即写 `N_ENVELOPE`（永不更新/删除），含每订阅方单调 `subSeq`、
+  稳定 `idempotencyKey`、信封内容指纹 `bodyHash`、入队时签名密钥 `signKid`。
+- **按订阅方独立持久待发队列**：**只有队头信封确认落链才推进游标**；队头未确认绝不投递后继。
+  不同订阅方各跑独立投递循环与退避计时，**互不阻塞**。
+- **稳定幂等键**：`dr-<subId>-<subSeq>-<dedupeKey哈希>`，入队时一次确定；超时/失败后再次请求
+  完全不变，订阅端据此去重（确认丢失后重投返回 `duplicate=true`，业务只执行一次）。
+- **进程重启续投**：成功只在 2xx 回执落链（`N_ACK`）后才算数。重启从 `notify.log` 重放重建
+  队列/游标/死信/密钥，未确认信封继续投递，**游标不回退、不重复推进**。桥接器以持久消费水位
+  （`N_BRIDGE_WATERMARK`）增量读内核链，重启不漏发、不重发。
+- **订阅校验**：登记后聚合商向订阅端 `/validate` 发带签名 challenge，订阅端回源 JWKS 验签并
+  原样回 challenge，订阅才置 ACTIVE。
+- **签名通知与密钥轮换**：非对称 Ed25519，私钥签名、订阅端只信公开 JWKS；轮换把旧密钥显式
+  落链为 `RETIRED` 且公钥长期保留，因此**轮换前已在途、轮换后重投/复验的旧信封仍可验签**。
+- **死信与人工重入队**：连续失败达上限（默认 5 次，指数退避 2/4/8/16/30s）进 DLQ 并移出队头让
+  后继继续；人工重入队后信封**回到原始 subSeq 位置**，恢复后顺序不变、签名证据仍可验证。
+
+快速体验：
+
+```bash
+npm start                 # 聚合商/编排服务 http://localhost:8080
+npm run subscriber        # 演示订阅端（默认 9100，自带故障模式控制台）
+# 投递台：http://localhost:8080/notify/   订阅端控制台：http://localhost:9100/
+npm run demo:notify       # 全自动端到端：六类故障/轮换/死信/重启场景（自起进程，约 100s）
+npm run test:notify       # 11 个通知模块单测
+```
+
+订阅端故障模式：`ok` / `fail`（持续 503→死信）/ `failOnce`（暂时失败一次）/ `timeout`
+（超时不响应，逼聚合商用同一幂等键再请求）/ `ackloss`（已处理但首次应答丢失）。
+多开订阅端：`SUB_PORT=9101 SUB_NAME=名称 npm run subscriber`。
+
+通知模块 HTTP API（均在 `/api/notify` 下）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/notify/view` | 投递台完整视图（订阅方队列/游标、信封、尝试、DLQ、链校验） |
+| GET | `/api/notify/jwks` | 公开 JWKS（含 ACTIVE 与 RETIRED 公钥，绝不含私钥） |
+| POST | `/api/notify/subscribers` | 登记订阅方 `{name,callbackUrl}` 并立即做订阅校验 |
+| POST | `/api/notify/subscribers/:id/verify` | 重试订阅校验握手 |
+| POST | `/api/notify/keys/rotate` | 轮换签名密钥（旧密钥落链 RETIRED，公钥保留） |
+| GET | `/api/notify/envelopes/:id` | 信封详情 + 逐条尝试 + 签名证据 |
+| POST | `/api/notify/envelopes/:id/ack` | 显式确认 API（重复确认安全，游标不重复推进） |
+| GET | `/api/notify/envelopes/:id/verify-signature` | 独立复验信封体哈希与签名密钥受信状态 |
+| GET | `/api/notify/dlq` | 死信队列 |
+| POST | `/api/notify/dlq/:id/requeue` | 人工把死信重新入队（回到原 subSeq 位置） |
+| POST | `/api/notify/pump` | 立即增量桥接内核事件 |
+| POST | `/api/notify/reset` | 演示复位（清空通知链并重新生成密钥） |
+
 ## HTTP API
 
 | 方法 | 路径 | 说明 |
@@ -119,8 +172,19 @@ src/
   seed.js         确定性种子（2 聚合商 / 3 计量点 / 5 设备 / 21 天 15 分钟曲线，含缺失日）
   clock.js        仿真时钟
   util.js         时间区间、规范化 JSON、哈希
+  notify/         聚合商通知投递模块（独立持久链 data/notify.log）
+    engine.js       不可变信封/每订阅方队列与游标/确认幂等/死信重入队/密钥轮换/订阅校验
+    dispatcher.js   每订阅方独立投递循环（互不阻塞）、超时中断、指数退避、稳定幂等键
+    bridge.js       内核链 → 通知（按持久消费水位增量翻译 5 时点，重启不漏不重）
+    crypto.js       Ed25519 签名/验签 + JWKS（轮换后旧 RETIRED 公钥保留）
+    routes.js       /api/notify/* HTTP 路由
+subscriber/       演示订阅端（server.js：订阅校验、独立验签、5 种故障模式、证据控制台）
 public/           运营台（index.html + app.js，含隔离/残尾恢复横幅）
+public/notify/    通知投递台（index.html + app.js：订阅/轮换/队列/证据/死信）
 test/kernel.test.js   14 个领域单测（node:test）
 test/recovery.test.js 13 个恢复契约单测（残尾/篡改/断链/503 边界/重启续链，含真实 HTTP）
+test/notify.test.js   11 个通知模块单测（顺序/游标幂等/死信/轮换/桥接/重启重放）
 scripts/e2e.mjs       24 项 HTTP 端到端断言
+scripts/notify-demo.mjs  通知模块全自动端到端（订阅校验/暂时失败/确认丢失/重复确认/
+                         密钥轮换旧在途/死信重入队/进程重启续投，约 100s）
 ```

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>聚合商通知投递台</title>
+<style>
+  :root{--bg:#0e1420;--panel:#161f2e;--panel2:#1c2738;--line:#28354a;--txt:#e6ecf5;--muted:#8fa0b8;
+    --accent:#4f9cff;--ok:#34c78a;--warn:#f0b429;--bad:#f06a6a;--violet:#b58cff;--cyan:#4fd6e0}
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--txt)}
+  header{display:flex;align-items:center;gap:14px;padding:13px 22px;background:linear-gradient(90deg,#1a1430,#0e1420);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
+  header h1{font-size:17px;margin:0}
+  .wrap{display:grid;grid-template-columns:330px 1fr 360px;gap:14px;padding:14px 22px;align-items:start}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+  .panel h2{font-size:12.5px;margin:0 0 10px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
+  label{display:block;font-size:12px;color:var(--muted);margin:8px 0 3px}
+  select,input,button{font:inherit;width:100%;background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:7px 9px}
+  button{cursor:pointer;width:auto;padding:6px 11px;font-weight:600}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#06101f}
+  button.good{background:var(--ok);border-color:var(--ok);color:#06140d}
+  button.warn{background:var(--warn);border-color:var(--warn);color:#1c1400}
+  button.bad{background:var(--bad);border-color:var(--bad);color:#200606}
+  button.ghost{background:transparent;color:var(--muted);padding:5px 9px}
+  button.violet{background:var(--violet);border-color:var(--violet);color:#160a26}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  .row{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+  .muted{color:var(--muted);font-size:12px}
+  .mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,Consolas,monospace}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th,td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{color:var(--muted);font-weight:600;font-size:11px}
+  .tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:10.5px;font-weight:700}
+  .t-PENDING{background:#13315c;color:#8fc2ff}
+  .t-ACKED{background:#0f3a2a;color:#5fe3ac}
+  .t-DEAD{background:#3f1d1d;color:#ff9d9d}
+  .t-ACTIVE{background:#0f3a2a;color:#5fe3ac}
+  .t-RETIRED{background:#26303f;color:#9fb2c8}
+  .t-PENDING_SUB{background:#3d2f10;color:#f5c451}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:10px;margin-bottom:9px}
+  .card.dead{border-color:var(--bad)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:1px 10px;font-size:12px}
+  .kv dt{color:var(--muted)}.kv dd{margin:0;text-align:right;word-break:break-all}
+  pre.log{max-height:230px;overflow:auto;background:#0a101b;border:1px solid var(--line);border-radius:8px;padding:9px;font-size:10.5px;color:#a9c0dd;white-space:pre-wrap}
+  .pill{font-size:11px;border:1px solid var(--line);border-radius:99px;padding:1px 8px;color:var(--muted)}
+  .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.violet{color:var(--violet)}.cyan{color:var(--cyan)}
+  .toast-wrap{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:50}
+  .toast{background:#202b3d;border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:9px 13px;max-width:380px;box-shadow:0 10px 30px rgba(0,0,0,.4);animation:in .2s ease}
+  .toast.err{border-left-color:var(--bad)}.toast.ok{border-left-color:var(--ok)}
+  @keyframes in{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
+  details{margin-top:6px}summary{cursor:pointer;color:var(--muted);font-size:12px}
+  .scenario b{color:var(--cyan)}
+  a{color:var(--violet)}
+  .btns button{font-size:11px;padding:3px 7px;margin:2px 2px 0 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>📮 聚合商通知投递台</h1>
+  <span class="muted mono" id="clock">--</span>
+  <span id="wm" class="pill"></span>
+  <div style="flex:1"></div>
+  <a class="pill" href="/" style="text-decoration:none;padding:5px 10px">⚡ 返回运营台</a>
+  <button class="ghost" onclick="load()">刷新</button>
+  <button class="bad" onclick="resetAll()">复位通知演示</button>
+</header>
+
+<div class="wrap">
+  <!-- 左：密钥 + 订阅 + 场景 -->
+  <div>
+    <div class="panel">
+      <h2>① 签名密钥（Ed25519 / JWKS）</h2>
+      <div id="keys"></div>
+      <div style="margin-top:8px"><button class="violet" onclick="rotateKey()">轮换签名密钥（保留旧公钥）</button></div>
+      <div class="muted" style="margin-top:5px">轮换后旧信封仍由其 <span class="mono">kid</span> 指向的旧（RETIRED）公钥验签。
+        公开 JWKS：<a href="/api/notify/jwks" target="_blank">/api/notify/jwks</a></div>
+    </div>
+
+    <div class="panel">
+      <h2>② 登记订阅方 + 订阅校验</h2>
+      <label>名称</label><input id="subName" placeholder="例如 北部聚合商" value="演示聚合商">
+      <label>回调地址</label><input id="subUrl" value="http://localhost:9100/">
+      <div style="margin-top:8px"><button class="primary" onclick="addSubscriber()">登记并校验</button></div>
+      <div class="muted" style="margin-top:5px">先起订阅端：<span class="mono">npm run subscriber</span>（默认 9100，可多开 SUB_PORT=9101）</div>
+      <div style="margin-top:6px" class="row">
+        <a href="http://localhost:9100/" target="_blank">打开 9100 控制台</a>
+      </div>
+    </div>
+
+    <div class="panel scenario">
+      <h2>③ 六个演示场景</h2>
+      <div class="muted" style="line-height:1.7">
+        <div><b>A 暂时失败</b>：订阅端选 <span class="mono">failOnce</span>，发布事件 → 重试后恢复，顺序不变。</div>
+        <div><b>B 确认丢失</b>：选 <span class="mono">ackloss</span> → 已处理但首次 500，重投同幂等键回 200 且 duplicate。</div>
+        <div><b>C 重复确认</b>：对已确认信封再点“手动确认” → duplicate，游标不重复推进。</div>
+        <div><b>D 密钥轮换</b>：轮换后对旧信封“用 JWKS 复验签名”，仍 OK（旧公钥 RETIRED 保留）。</div>
+        <div><b>E 死信重入队</b>：选 <span class="mono">fail</span> 发事件耗尽重试进死信，切回 <span class="mono">ok</span> 后“人工重新入队”。</div>
+        <div><b>F 重启续投</b>：确认前 kill 聚合商进程再启动，未确认信封继续、游标不重复推进。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 中：订阅方队列 -->
+  <div>
+    <div class="panel">
+      <h2>④ 每订阅方持久待发队列（队头顺序 · 独立游标）</h2>
+      <div id="subs" class="muted">尚无订阅方。</div>
+    </div>
+    <div class="panel">
+      <h2>⑤ 信封投递总览（不可变信封）</h2>
+      <table>
+        <thead><tr><th>#序</th><th>订阅方</th><th>类型</th><th>事件</th><th>尝试</th><th>签名密钥</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="envs"></tbody>
+      </table>
+      <div class="muted" style="margin-top:6px">同订阅方按 subSeq 顺序投递；超时/失败重投使用同一稳定幂等键。</div>
+    </div>
+  </div>
+
+  <!-- 右：证据 / 死信 / 审计 -->
+  <div>
+    <div class="panel">
+      <h2>⑥ 信封与签名证据</h2>
+      <div id="evidence" class="muted">点任一行的“证据”查看信封体哈希复算与签名密钥链。</div>
+    </div>
+    <div class="panel">
+      <h2>⑦ 死信队列（人工重新入队）</h2>
+      <div id="dlq" class="muted">无死信。</div>
+    </div>
+    <div class="panel">
+      <h2>投递审计（最近尝试）</h2>
+      <pre class="log" id="audit">（自动刷新）</pre>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts"></div>
+<script src="app.js"></script>
+</body>
+</html>
