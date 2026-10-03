@@ -16,8 +16,26 @@ npm start                 # http://localhost:8080
 ```
 
 - 设备执行页面（运营台）：http://localhost:8080/
-- 自动化测试：`npm test`（27 个领域/恢复单测）
+- 自动化测试：`npm test`（39 个领域/恢复单测，含 12 个通知投递契约）
 - 端到端场景：先 `npm start`，再 `npm run test:e2e`（24 项 HTTP 断言）
+
+## 聚合商通知投递模块（独立服务，`notifier/`）
+
+事件 **发布 / 撤销 / 开始 / 结束 / 报告订正** 时为订阅方生成 **Ed25519 签名的不可变信封**，
+按订阅方维护独立的持久待发队列：同订阅方严格按事件顺序投递、稳定幂等键处理超时重投、
+不同订阅方互不阻塞、重启后继续未确认投递且游标不重复推进。支持 WebSub 风格订阅校验、
+HMAC 回执确认 API、密钥轮换（旧在途通知仍可验）、死信人工重新入队与签名证据页。
+
+```bash
+npm run notifier          # 投递服务 + 投递台 → http://localhost:8091/
+npm run demo:notifier     # 一键演示 7 个故障/恢复场景（暂时失败/确认丢失/重复确认/
+                          #                 轮换验签/死信重入/重启恢复/证据可验）
+npm run test:notifier     # 24 项真实 HTTP 端到端断言
+```
+
+该服务只读尾随 `data/events.log`（`sourceRef=orch:<seq>` 幂等），不回写编排内核；
+详见 [`notifier/README.md`](notifier/README.md)。
+
 
 ## 重启恢复契约（日志损坏 / 断电残尾）
 
